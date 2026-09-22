@@ -1,0 +1,7 @@
+account_id,bank_name,currency,account_type
+ACC-001,Banco Aurora,COP,operational
+ACC-002,Banco Aurora,USD,operational
+ACC-003,Banco Sureste,COP,reserve
+ACC-004,Banco Azteca+,MXN,operational
+ACC-005,Banco Azteca+,MXN,reserve
+ACC-006,Banco Norte,USD,reserve

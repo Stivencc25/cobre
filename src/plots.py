@@ -173,6 +173,78 @@ def fig_acf_pacf(stationary: dict, diff_table: pd.DataFrame, which: str = "acf")
     return _save(fig, "09_acf" if which == "acf" else "10_pacf")
 
 
+def fig_acf_pacf_combined(stationary: dict, diff_table: pd.DataFrame):
+    """ACF y PACF lado a lado, cuenta por cuenta y serie por serie, para leerlos juntos (la lectura clásica Box-Jenkins:
+    un corte abrupto en el PACF con ACF que decae de a poco sugiere AR; al revés, sugiere MA).
+
+    Misma cuenta = misma fila; cada serie ocupa un par de columnas contiguas (ACF | PACF). Mismo estilo y misma banda
+    de ruido blanco que ``fig_acf_pacf``, solo que en una sola figura en vez de dos.
+    """
+    from statsmodels.tsa.stattools import acf, pacf
+
+    accounts = sorted({a for a, _ in stationary})
+    series = sorted({c for _, c in stationary}, key=["balance", "inflow", "outflow"].index)
+    kinds = ("acf", "pacf")
+
+    cache, peak = {}, 0.0
+    for acc in accounts:
+        for col in series:
+            x = stationary[(acc, col)]
+            for kind in kinds:
+                vals = (acf(x, nlags=cfg.ACF_NLAGS, fft=True) if kind == "acf" else pacf(x, nlags=cfg.ACF_NLAGS, method="ywm"))[1:]
+                band = 1.96 / np.sqrt(len(x))
+                cache[(acc, col, kind)] = (vals, band)
+                peak = max(peak, np.abs(vals).max())
+    ylim = max(0.3, min(1.0, peak * 1.25))
+
+    ncols = len(series) * len(kinds)
+    fig, axes = plt.subplots(len(accounts), ncols, figsize=(2.3 * ncols, 1.9 * len(accounts) + 1.2), sharex=True, sharey=True,
+                             facecolor=_SURFACE, constrained_layout=True)
+    for i, acc in enumerate(accounts):
+        for j, col in enumerate(series):
+            for k, kind in enumerate(kinds):
+                ax = axes[i, j * 2 + k]
+                vals, band = cache[(acc, col, kind)]
+                lags = np.arange(1, len(vals) + 1)
+                sig = np.abs(vals) > band
+
+                ax.axhspan(-band, band, color=_GRID, alpha=0.55, zorder=1, lw=0)
+                ax.bar(lags, vals, width=0.65, color=[_FLAG if l in cfg.SEASONAL_LAGS else _AFTER for l in lags], zorder=3)
+                ax.axhline(0, color=_INK2, lw=0.8, zorder=2)
+                for l, v in zip(lags, vals):
+                    if l in cfg.SEASONAL_LAGS and abs(v) > band:
+                        ax.annotate(f"{v:.2f}", (l, v), xytext=(0, 3 if v >= 0 else -3), textcoords="offset points",
+                                    ha="center", va="bottom" if v >= 0 else "top", fontsize=6.5, color=_FLAG, fontweight="bold", zorder=4)
+                if k == 0:
+                    d = diff_table.loc[(acc, col), "d"]
+                    ax.set_title(f"{acc} · {col} · {kind.upper()}", loc="left", fontsize=9, color=_INK)
+                    ax.text(1, 1.02, "diferencia" if d else "sin tendencia", transform=ax.transAxes, ha="right", va="bottom",
+                            fontsize=7, color=_INK2)
+                else:
+                    ax.set_title(kind.upper(), loc="left", fontsize=8.5, color=_INK2)
+                    ax.text(1, 1.02, f"{int(sig.sum())}/{len(vals)} fuera de banda", transform=ax.transAxes, ha="right", va="bottom",
+                            fontsize=7, color=_INK2)
+                ax.set_facecolor(_SURFACE)
+                ax.set_ylim(-ylim, ylim)
+                ax.set_xticks([7, 14, 21, 28])
+                for sp in ("top", "right", "left"):
+                    ax.spines[sp].set_visible(False)
+                ax.spines["bottom"].set_color(_GRID)
+                ax.tick_params(colors=_INK2, labelsize=8, length=0)
+                ax.grid(axis="y", color=_GRID, lw=0.6, zorder=0); ax.grid(axis="x", visible=False)
+        axes[i, 0].set_ylabel(acc, fontsize=8.5, color=_INK2)
+    axes[-1, ncols // 2].set_xlabel("rezago (días)", fontsize=8.5, color=_INK2)
+    handles = [
+        plt.Rectangle((0, 0), 1, 1, color=_AFTER, label="rezago"),
+        plt.Rectangle((0, 0), 1, 1, color=_FLAG, label="rezago estacional (7, 14, 21, 28)"),
+        plt.Rectangle((0, 0), 1, 1, color=_GRID, alpha=0.55, label="banda 95% de un ruido blanco"),
+    ]
+    fig.legend(handles=handles, loc="outside lower center", ncol=3, frameon=False, fontsize=8.5, labelcolor=_INK2)
+    fig.suptitle("ACF y PACF juntos, por cuenta y serie: cada par de columnas es (ACF | PACF) de la misma serie",
+                 fontsize=12, color=_INK, x=0.01, ha="left")
+    return _save(fig, "09b_acf_pacf_combined")
+
+
 def fig_seasonality(panel: pd.DataFrame, serie: str):
     """Perfil de estacionalidad de UNA serie (saldo, inflow u outflow): cuentas en filas, ciclos en columnas.
 
@@ -360,6 +432,148 @@ def fig_fan_models(book, flows: pd.DataFrame, t: int, account: str, models: tupl
     fig.suptitle(f"{account}: saldo proyectado a {horizon} días desde {book.dates[t].date()} — los {len(models)} modelos de F3",
                  fontsize=12, color=_INK, x=0.01, ha="left")
     return _save(fig, f"06b_fan_models_{account}")
+
+
+def fig_last14_models(last14: pd.DataFrame, panel: pd.DataFrame, order: list[str], thresholds: dict[str, float] | None = None,
+                       highlight: str | None = None):
+    """D4f/D11 — los 9 modelos de D4c/D4d/D4e (``last14``, el fold final de ``TimeSeriesSplit``, sin reentrenar)
+    contra el saldo real, un panel por cuenta, con el umbral fijo del squad (D7, ``cfg.SQUAD_THRESHOLD``) donde
+    exista (4 de 6 cuentas). ``highlight`` resalta un modelo (p. ej. el de menor sMAPE en esta ventana) con su
+    propio color a todo color y grosor, atenuando el resto; el negro queda reservado para el saldo real.
+    """
+    thresholds = cfg.SQUAD_THRESHOLD if thresholds is None else thresholds
+    meta = panel.drop_duplicates("account_id").set_index("account_id")["currency"]
+    accounts = sorted(last14["account_id"].unique())
+    cmap = plt.get_cmap("tab10")
+    colors = {m: cmap(i % 10) for i, m in enumerate(order)}
+    ncols = 3
+    nrows = -(-len(accounts) // ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.5 * ncols, 3.9 * nrows), sharex=False, constrained_layout=True)
+    axes = np.atleast_1d(axes).ravel()
+    for ax, acc in zip(axes, accounts):
+        g = last14[last14["account_id"] == acc]
+        ccy = meta.loc[acc]
+        s = _scale(ccy)
+        real = g.drop_duplicates("date").set_index("date")["real"].sort_index()
+        ax.plot(real.index, real.to_numpy() / s, color="k", lw=2.2, marker="o", ms=3.5, label="real", zorder=6)
+        for m in order:
+            gm = g[g["model"] == m].sort_values("date")
+            if gm.empty:
+                continue
+            is_hl = m == highlight
+            ax.plot(gm["date"], gm["forecast"] / s, color=colors[m], lw=(2.4 if is_hl else 1.0),
+                     alpha=(1.0 if is_hl else 0.45), marker=("s" if is_hl else None), ms=(3.5 if is_hl else 0),
+                     zorder=(5 if is_hl else 3), label=(f"{m} (menor sMAPE)" if is_hl else m))
+        thr = thresholds.get(acc)
+        if thr is not None:
+            ax.axhline(thr / s, color="#C44E52", ls="--", lw=1.3, label="umbral fijo del squad (D7)", zorder=4)
+        ax.set_title(f"{acc} ({ccy})", loc="left", fontsize=9.5)
+        ax.set_ylabel(_fmt(ccy), fontsize=8)
+        ax.tick_params(labelsize=7.5, rotation=30)
+    for ax in axes[len(accounts):]:
+        ax.set_visible(False)
+    handles, labels = axes[0].get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    fig.legend(by_label.values(), by_label.keys(), loc="outside lower center", ncol=4, frameon=False, fontsize=7.5)
+    fig.suptitle("D11 — Los 9 modelos de D4c–D4e vs. saldo real, últimos 14 días reales del dataset (sin reentrenar)",
+                 fontsize=11, x=0.01, ha="left")
+    return _save(fig, "05b_last14_models_grid")
+
+
+def fig_fan_floor_grid(book, store, t: int, horizon: int = cfg.DECISION_HORIZON, n: int = 2000, accounts=None):
+    """Como ``fig_fan``, pero las 6 cuentas a la vez y contra el **piso dinámico** (``book.floor``,
+    K días de egreso medio) en vez del umbral fijo del squad (D7) — el insumo visual del trigger de 2.8:
+    ``Alerta_i <=> Q_alpha(min balance proyectado) < piso_i``.
+
+    El piso se dibuja como serie (no línea horizontal) porque ``book.floor`` depende del egreso medio
+    móvil de 28 días y puede variar día a día dentro del horizonte proyectado.
+    """
+    accounts = list(accounts or book.accounts)
+    f = store[t]
+    ncols = 3
+    nrows = -(-len(accounts) // ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.3 * ncols, 3.7 * nrows), sharex=False, constrained_layout=True)
+    axes = np.atleast_1d(axes).ravel()
+    for ax, account in zip(axes, accounts):
+        a = book.accounts.index(account)
+        paths = f.draw(n, np.random.default_rng(1))[:, :, a]
+        proj = book.balance[t, a] + np.cumsum(paths, axis=1)
+        q = np.quantile(proj, [0.05, 0.25, 0.5, 0.75, 0.95], axis=0)
+        s, ccy = _scale(book.ccy[a]), book.ccy[a]
+
+        past = slice(max(t - 30, 0), t + 1)
+        ax.plot(book.dates[past], book.balance[past, a] / s, color="k", lw=1.4, label="saldo observado")
+        real = slice(t, min(t + horizon + 1, len(book.dates)))
+        ax.plot(book.dates[real], book.balance[real, a] / s, color="k", lw=1.4, ls=":", label="saldo realizado (fuera de muestra)")
+        ax.fill_between(f.dates, q[0] / s, q[4] / s, color=PALETTE["quantile"], alpha=0.18, label="p5–p95")
+        ax.fill_between(f.dates, q[1] / s, q[3] / s, color=PALETTE["quantile"], alpha=0.30, label="p25–p75")
+        ax.plot(f.dates, q[2] / s, color=PALETTE["quantile"], label="mediana")
+
+        floor_len = max(min(horizon, len(book.dates) - (t + 1)), 0)
+        if floor_len > 0:
+            ax.plot(f.dates[:floor_len], book.floor[t + 1:t + 1 + floor_len, a] / s, color="k", ls="--", lw=1.3, label="piso (K días de egreso)")
+        breach = float((proj[:, -1] < book.floor[min(t + horizon, len(book.dates) - 1), a]).mean())
+        ax.text(1, 1.02, f"P(<piso) a {horizon}d = {breach:.0%}", transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5)
+
+        ax.set_title(f"{account} ({book.acc_type[a]}, {ccy})", loc="left", fontsize=9.5)
+        ax.set_ylabel(_fmt(ccy), fontsize=8)
+        ax.tick_params(labelsize=7.5, rotation=30)
+    for ax in axes[len(accounts):]:
+        ax.set_visible(False)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="outside lower center", ncol=len(labels), frameon=False, fontsize=8)
+    fig.suptitle(f"Pronóstico p5–p95 (F3, {store.model}) vs. piso dinámico por cuenta — origen {book.dates[t].date()}, horizonte {horizon}d", fontsize=11, x=0.01, ha="left")
+    return _save(fig, f"06c_fan_floor_grid_{store.model}")
+
+
+def fig_surplus_by_k(tab: pd.DataFrame, k_chosen: float = cfg.MIN_COVER_DAYS["operational"]):
+    """Por qué K=25: excedente agregado mínimo del sistema y días-cuenta bajo el piso, en función de K.
+
+    ``tab`` = ``diagnosis.system_surplus_by_k(panel)``, indexada por K (días de egreso medio de 28d).
+    """
+    ks = tab.index.to_numpy(dtype=float)
+    surplus = tab["excedente_agregado_min_USD"].to_numpy() / 1e6
+    days = tab["dias-cuenta bajo el piso (sin intervenir)"].to_numpy()
+    colors = [_FLAG if s < 0 else _AFTER for s in surplus]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.4), facecolor=_SURFACE, constrained_layout=True)
+
+    ax = axes[0]
+    ax.axhline(0, color=_INK2, lw=0.9, ls="-", zorder=1)
+    ax.plot(ks, surplus, color=_INK2, lw=1.2, zorder=2)
+    ax.scatter(ks, surplus, s=70, color=colors, edgecolors=_SURFACE, linewidths=1.2, zorder=3)
+    if k_chosen in tab.index:
+        y0 = tab.loc[k_chosen, "excedente_agregado_min_USD"] / 1e6
+        ax.scatter([k_chosen], [y0], s=170, facecolors="none", edgecolors=_AFTER, linewidths=2, zorder=4)
+        ax.annotate(f"K={k_chosen:g} elegido\nexcedente mín. ≈ USD {y0:,.1f} M", (k_chosen, y0),
+                    textcoords="offset points", xytext=(10, 12), fontsize=8.5, color=_INK)
+    neg = tab[tab["excedente_agregado_min_USD"] < 0]
+    if not neg.empty:
+        k_break = neg.index.min()
+        ax.annotate("el sistema deja de ser\nsolvente en agregado", (k_break, tab.loc[k_break, "excedente_agregado_min_USD"] / 1e6),
+                    textcoords="offset points", xytext=(-10, -26), fontsize=8, color=_FLAG, ha="right")
+    ax.set_xlabel("K (días de egreso medio de 28d)", fontsize=8.5, color=_INK2)
+    ax.set_ylabel("Excedente agregado mínimo\n(USD equiv., millones)", fontsize=8.5, color=_INK2)
+    ax.set_title("Solvencia agregada: Σ(saldo − K·egreso medio)", loc="left", fontsize=9.5, color=_INK)
+    ax.grid(axis="y", color=_GRID, lw=0.8); ax.grid(axis="x", visible=False); ax.set_axisbelow(True)
+
+    ax = axes[1]
+    bar_colors = [_AFTER if k == k_chosen else _INK2 if d == 0 else _FLAG if d > 100 else _AFTER for k, d in zip(ks, days)]
+    ax.bar([str(int(k)) if k == int(k) else str(k) for k in ks], days, color=bar_colors, width=0.62, zorder=3)
+    for k, d in zip(ks, days):
+        ax.text(str(int(k)) if k == int(k) else str(k), d, f"{d:,}", ha="center", va="bottom", fontsize=7.5, color=_INK)
+    ax.set_xlabel("K (días de egreso medio de 28d)", fontsize=8.5, color=_INK2)
+    ax.set_ylabel("Días-cuenta bajo el piso\n(sin intervenir, 210 días × 6 cuentas)", fontsize=8.5, color=_INK2)
+    ax.set_title("K muy bajo: nunca hay faltante que resolver", loc="left", fontsize=9.5, color=_INK)
+    ax.grid(axis="y", color=_GRID, lw=0.8); ax.grid(axis="x", visible=False); ax.set_axisbelow(True)
+
+    handles = [plt.Line2D([], [], marker="o", ls="", ms=8, color=_AFTER, mec=_SURFACE, label="excedente agregado positivo"),
+               plt.Line2D([], [], marker="o", ls="", ms=8, color=_FLAG, mec=_SURFACE, label="excedente agregado negativo (problema de fondeo, no de rebalanceo)"),
+               plt.Line2D([], [], marker="o", ls="", ms=13, mfc="none", mec=_AFTER, mew=2, label=f"K={k_chosen:g}: elegido en este notebook")]
+    fig.legend(handles=handles, loc="outside lower center", ncol=1, frameon=False, fontsize=8.5, labelcolor=_INK2)
+    fig.suptitle("¿Por qué K=25? Bastante bajo para dejar faltantes reales que resolver, bastante alto para no vaciar la solvencia agregada del sistema",
+                 fontsize=11, color=_INK, x=0.01, ha="left")
+    return _save(fig, "00_surplus_by_k")
 
 
 def fig_frontier(totals: pd.DataFrame, highlight_lp: float = cfg.DEFICIT_PENALTY_PER_DAY):

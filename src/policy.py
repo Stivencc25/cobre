@@ -397,7 +397,11 @@ def target_buffer(ctx: Context, a: int, donor: int, alpha: float = cfg.QUANTILE_
     q_path = np.quantile(np.cumsum(paths, axis=1), alpha, axis=0)          # (H_forecast,) trayectoria del cuantil alpha
     q_worst = float(q_path[L:].min())                                       # peor día alcanzable por una transferencia pedida hoy
     b_hat = ctx.bal[a] + q_worst                                            # saldo "pesimista" (piso + colchón) en el peor día
-    mu_burn = max(-float(ctx.forecast.mean[:, a].mean()), 0.0)              # egreso neto medio diario
+    # egreso neto medio diario: de las trayectorias muestreadas (paths), no de ctx.forecast.mean — para
+    # "empirical" (el modelo elegido en 2.3/D12) el punto es 0 por diseño (F3 lo usa como chequeo de cordura),
+    # así que leer solo `.mean` deja este término en 0 SIEMPRE con ese modelo, sin importar cuánta deriva real
+    # tenga la cuenta (D-reto: la deriva sí está en `paths`, que ya se dibujó arriba — no hace falta otro draw).
+    mu_burn = max(-float(paths.mean()), 0.0)
     target = floor + H * mu_burn
     return {
         "lag_dias": L, "piso": floor, "b_hat_alpha": b_hat, "mu_burn_diario": mu_burn,

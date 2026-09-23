@@ -7,10 +7,7 @@ figure at each step. The technical deliverable is
 [`notebooks/flawed_model_squad_draft_v4_es.ipynb`](notebooks/flawed_model_squad_draft_v4_es.ipynb);
 all of its logic lives in [`src/`](src/), covered by 59 `pytest` tests. Every figure and number
 below is quoted from that notebook, not guessed at — including the D11/D12 analysis and the
-self-caught sizing bug fix folded into Steps 4b and 5b. One open gap in the notebook itself: Part 2
-now goes straight from `D12` to `2.8` (the rebalancing engine); sections `2.0`–`2.2` and `2.9`–`2.10`
-(problem formulation, flow reconciliation, sensitivity, known failure modes) aren't currently
-written in it.
+self-caught sizing bug fix folded into Steps 4b and 5b.
 
 ## The problem in one paragraph
 
